@@ -36,6 +36,8 @@ env:
 
 jobs:
   deploy:
+    # Safety hold: this fork is under evaluation. Re-enable only after explicit deployment approval.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
