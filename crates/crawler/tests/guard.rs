@@ -144,3 +144,35 @@ async fn works_as_a_reqwest_resolver() {
     assert_eq!(ok.len(), 1);
     assert!(r.resolve("evil.test".parse().unwrap()).await.is_err());
 }
+
+struct SequenceLookup(std::sync::Mutex<std::collections::VecDeque<Vec<IpAddr>>>);
+
+impl Lookup for SequenceLookup {
+    fn lookup(&self, _host: &str) -> impl Future<Output = io::Result<Vec<IpAddr>>> + Send {
+        let answer = self.0.lock().unwrap().pop_front();
+        async move {
+            answer.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no DNS answer left"))
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_changed_dns_answer_is_checked_again_on_the_next_resolution() {
+    let lookup = SequenceLookup(std::sync::Mutex::new(
+        [
+            vec!["93.184.216.34".parse().unwrap()],
+            vec!["127.0.0.1".parse().unwrap()],
+        ]
+        .into(),
+    ));
+    let resolver = GuardedResolver::new(lookup);
+
+    let first = resolver.lookup_checked("changing.test").await.unwrap();
+    assert_eq!(first[0].ip().to_string(), "93.184.216.34");
+
+    let second = resolver.lookup_checked("changing.test").await.unwrap_err();
+    assert!(
+        matches!(second, GuardError::OnlyBlockedAddresses { .. }),
+        "{second:?}"
+    );
+}
