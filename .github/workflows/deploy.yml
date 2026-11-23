@@ -16,6 +16,8 @@ on:
     branches: [main]
     paths:
       - "crates/**"
+      - "!crates/**/tests/**"
+      - "!crates/**/benches/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Dockerfile"
