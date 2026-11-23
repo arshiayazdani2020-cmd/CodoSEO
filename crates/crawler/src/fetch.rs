@@ -330,3 +330,70 @@ fn error_chain(e: &reqwest::Error) -> String {
     }
     msg
 }
+
+#[cfg(test)]
+mod redirect_security_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn public_policy_blocks_private_ip_redirect_before_second_request() {
+        let public_fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_addr = public_fixture.local_addr().unwrap();
+        let private_fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let private_addr = private_fixture.local_addr().unwrap();
+
+        let response_task = tokio::spawn(async move {
+            let (mut stream, _) = public_fixture.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                private_addr.port()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        // Test-only DNS pinning routes a fake public hostname to the local fixture.
+        // The real Public URL policy remains enabled for the redirect destination.
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .no_proxy()
+            .resolve(
+                "public-fixture.test",
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), public_addr.port()),
+            )
+            .build()
+            .unwrap();
+        let mut cfg = FetcherConfig::new(AddressPolicy::Public);
+        cfg.request_timeout = Duration::from_secs(2);
+        let fetcher = Fetcher {
+            client,
+            cfg,
+            sent: AtomicU32::new(0),
+        };
+
+        let start = Url::parse(&format!("http://public-fixture.test:{}/start", public_addr.port()))
+            .unwrap();
+        let result = fetcher.fetch(&start).await;
+        response_task.await.unwrap();
+
+        assert!(
+            matches!(result, Err(FetchError::Blocked(_))),
+            "expected private redirect to be blocked, got {result:?}"
+        );
+        assert_eq!(fetcher.requests(), 1, "second request must never be sent");
+
+        let private_request = tokio::time::timeout(
+            Duration::from_millis(100),
+            private_fixture.accept(),
+        )
+        .await;
+        assert!(
+            private_request.is_err(),
+            "private redirect destination unexpectedly received a connection"
+        );
+    }
+}
