@@ -1,0 +1,31 @@
+name: crawler-security-tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/crawler-security-tests.yml"
+      - "crates/crawler/**"
+      - "crates/core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crawler:
+    name: Crawler, Fetcher and SSRF guard tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the complete crawler crate test suite
+        run: cargo test -p codoseo-crawler --locked
