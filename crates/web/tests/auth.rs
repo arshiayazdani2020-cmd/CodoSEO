@@ -555,6 +555,8 @@ async fn first_selfhosted_signup_becomes_owner_and_signups_can_close() {
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     assert!(res.body.contains("Signups are closed"));
+    assert!(token_is_used(&app, &token).await,
+        "a permanent signup-policy refusal must not restore the consumed link");
     let token = request_link(&app, "member@example.com", "/").await;
     assert_eq!(consume(&app, &token).await.0, StatusCode::SEE_OTHER);
     assert_eq!(account_count(&app).await, 2);
