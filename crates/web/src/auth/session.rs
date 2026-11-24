@@ -51,9 +51,10 @@ pub fn set_cookie(name: &str, value: &str, max_age_secs: i64, secure: bool) -> H
 /// Creates a session for the account and returns the `Set-Cookie` header value.
 pub async fn start(state: &AppState, account_id: Uuid) -> Result<HeaderValue, AppError> {
     let token = random_token();
+    // Update the account first: if it fails, no unreachable session row is left behind.
+    codoseo_store::accounts::touch_login(&state.pool, account_id).await?;
     codoseo_store::auth::create_session(&state.pool, account_id, &hash(&token), SESSION_TTL)
         .await?;
-    codoseo_store::accounts::touch_login(&state.pool, account_id).await?;
     Ok(set_cookie(
         SESSION_COOKIE,
         &token,
