@@ -108,6 +108,124 @@ async fn two_concurrent_posts_can_consume_a_magic_link_only_once() {
     assert_eq!(sessions, 1);
 }
 
+/// Installs a database trigger that fails one selected write. Each test owns a fresh DB,
+/// so the trigger cannot affect another test or any shared environment.
+async fn inject_write_failure(app: &TestApp, trigger_sql: &str) {
+    sqlx::query(
+        "CREATE FUNCTION codoseo_test_fail() RETURNS trigger \
+         LANGUAGE plpgsql AS $ BEGIN RAISE EXCEPTION 'injected database failure'; END $",
+    )
+    .execute(app.pool())
+    .await
+    .unwrap();
+    sqlx::query(trigger_sql).execute(app.pool()).await.unwrap();
+}
+
+async fn token_is_used(app: &TestApp, token: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM login_tokens WHERE token_hash = $1 AND used_at IS NOT NULL)",
+    )
+    .bind(codoseo_web::auth::session::hash(token))
+    .fetch_one(app.pool())
+    .await
+    .unwrap()
+}
+
+async fn session_count(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(app.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn magic_link_account_insert_failure_consumes_token_without_creating_account() {
+    let app = TestApp::new().await;
+    let token = request_link(&app, "insert-fail@example.com", "/").await;
+    inject_write_failure(
+        &app,
+        "CREATE TRIGGER codoseo_test_fail_trigger BEFORE INSERT ON accounts \
+         FOR EACH ROW EXECUTE FUNCTION codoseo_test_fail()",
+    )
+    .await;
+
+    let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(token_is_used(&app, &token).await);
+    assert_eq!(account_count(&app).await, 0);
+    assert_eq!(session_count(&app).await, 0);
+    assert_eq!(consume(&app, &token).await.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn magic_link_session_insert_failure_leaves_account_but_no_session() {
+    let app = TestApp::new().await;
+    let token = request_link(&app, "session-fail@example.com", "/").await;
+    inject_write_failure(
+        &app,
+        "CREATE TRIGGER codoseo_test_fail_trigger BEFORE INSERT ON sessions \
+         FOR EACH ROW EXECUTE FUNCTION codoseo_test_fail()",
+    )
+    .await;
+
+    let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(token_is_used(&app, &token).await);
+    assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, 0);
+}
+
+#[tokio::test]
+async fn magic_link_touch_login_failure_leaves_session_without_returning_cookie() {
+    let app = TestApp::new().await;
+    app.login("touch-fail@example.com").await;
+    let before = session_count(&app).await;
+    let token = request_link(&app, "touch-fail@example.com", "/").await;
+    inject_write_failure(
+        &app,
+        "CREATE TRIGGER codoseo_test_fail_trigger BEFORE UPDATE ON accounts \
+         FOR EACH ROW WHEN (NEW.last_login_at IS DISTINCT FROM OLD.last_login_at) \
+         EXECUTE FUNCTION codoseo_test_fail()",
+    )
+    .await;
+
+    let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(res.cookie("codoseo_session").is_none());
+    assert!(token_is_used(&app, &token).await);
+    assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, before + 1);
+}
+
+#[tokio::test]
+async fn magic_link_email_click_failure_leaves_session_without_returning_cookie() {
+    let app = TestApp::new().await;
+    app.login("click-fail@example.com").await;
+    let before = session_count(&app).await;
+    let token = request_link(&app, "click-fail@example.com", "/").await;
+    inject_write_failure(
+        &app,
+        "CREATE TRIGGER codoseo_test_fail_trigger BEFORE UPDATE ON accounts \
+         FOR EACH ROW WHEN (NEW.last_email_click_at IS DISTINCT FROM OLD.last_email_click_at) \
+         EXECUTE FUNCTION codoseo_test_fail()",
+    )
+    .await;
+
+    let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(res.cookie("codoseo_session").is_none());
+    assert!(token_is_used(&app, &token).await);
+    assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, before + 1);
+    let click: Option<time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT last_email_click_at FROM accounts WHERE email = $1")
+            .bind("click-fail@example.com")
+            .fetch_one(app.pool())
+            .await
+            .unwrap();
+    assert!(click.is_none());
+}
+
 #[tokio::test]
 async fn reused_and_expired_tokens_are_rejected() {
     let app = TestApp::new().await;
