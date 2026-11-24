@@ -106,7 +106,7 @@ mod tests {
                 let n = stream.read(&mut chunk).await.unwrap();
                 assert!(n > 0, "client closed before sending the request");
                 request.extend_from_slice(&chunk[..n]);
-                if let Some(end) = request.windows(4).position(|w| w == b"\\r\\n\\r\\n") {
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&request[..end]);
                     let length = headers
                         .lines()
@@ -125,7 +125,7 @@ mod tests {
                 request.extend_from_slice(&chunk[..n]);
             }
             let response = format!(
-                "HTTP/1.1 {status}\\r\\ncontent-type: application/json\\r\\ncontent-length: {}\\r\\nconnection: close\\r\\n\\r\\n{body}",
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).await.unwrap();
@@ -163,7 +163,7 @@ mod tests {
             Verdict::Passed
         );
         let request = server.await.unwrap();
-        let body = request.split_once("\\r\\n\\r\\n").unwrap().1;
+        let body = request.split_once("\r\n\r\n").unwrap().1;
         assert!(body.contains("secret=secret-key"), "{body}");
         assert!(body.contains("response=valid-token"), "{body}");
         assert!(body.contains("remoteip=203.0.113.8"), "{body}");
