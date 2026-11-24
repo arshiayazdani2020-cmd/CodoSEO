@@ -84,9 +84,10 @@ async fn two_concurrent_posts_can_consume_a_magic_link_only_once() {
     let app = TestApp::new().await;
     let token = request_link(&app, "race@example.com", "/").await;
 
+    let path = format!("/auth/magic/{token}");
     let (first, second) = tokio::join!(
-        app.post(&format!("/auth/magic/{token}"), "", None),
-        app.post(&format!("/auth/magic/{token}"), "", None),
+        app.post(&path, "", None),
+        app.post(&path, "", None),
     );
     let statuses = [first.status, second.status];
     assert_eq!(
