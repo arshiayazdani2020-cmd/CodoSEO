@@ -50,6 +50,26 @@ async fn count(app: &TestApp, sql: &str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(app.pool()).await.unwrap()
 }
 
+/// Makes the funnel's final link-click event fail after the audit claim has committed.
+/// Each TestApp owns an isolated database, so this trigger cannot affect other tests.
+async fn inject_link_clicked_failure(app: &TestApp) {
+    sqlx::query(
+        "CREATE FUNCTION codoseo_test_fail_link_clicked() RETURNS trigger \
+         LANGUAGE plpgsql AS 'BEGIN IF NEW.kind = ''link_clicked'' THEN \
+         RAISE EXCEPTION ''injected link-click event failure''; END IF; RETURN NEW; END'",
+    )
+    .execute(app.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER codoseo_test_fail_link_clicked_trigger BEFORE INSERT ON events \
+         FOR EACH ROW EXECUTE FUNCTION codoseo_test_fail_link_clicked()",
+    )
+    .execute(app.pool())
+    .await
+    .unwrap();
+}
+
 /// A site with a spread of defects, so the audit has more than five failing checks.
 fn messy_pages(domain: &str) -> Vec<codoseo_core::page::PageRecord> {
     let mut pages = vec![page(domain, "/")];
@@ -669,6 +689,71 @@ async fn unlocking_emails_a_link_that_attaches_the_audit_and_queues_the_first_cr
     // The link works once.
     let again = app.post(&format!("/auth/magic/{link}"), "", None).await;
     assert_eq!(again.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_cookie() {
+    let app = cloud().await;
+    let started = submit(&app, "example.com").await;
+    let crawl = crawl_id(&started);
+    let claim = claim_token(&started);
+    finish(&app, crawl, messy_pages("example.com")).await;
+    assert_eq!(unlock(&app, crawl, "attach-fail@example.com").await.status, StatusCode::OK);
+    let link = emailed_token(&app);
+    inject_link_clicked_failure(&app).await;
+
+    let res = app
+        .post(
+            &format!("/auth/magic/{link}"),
+            "",
+            Some(&format!("{CLAIM_COOKIE}={claim}")),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(res.cookie("codoseo_session").is_none(), "no session cookie reaches the browser");
+
+    let token_used: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM login_tokens WHERE token_hash = $1 AND used_at IS NOT NULL)",
+    )
+    .bind(codoseo_web::auth::session::hash(&link))
+    .fetch_one(app.pool())
+    .await
+    .unwrap();
+    assert!(token_used, "the magic-link token was consumed");
+
+    let (account, last_click): (Uuid, Option<time::OffsetDateTime>) =
+        sqlx::query_as("SELECT id, last_email_click_at FROM accounts WHERE email = $1")
+            .bind("attach-fail@example.com")
+            .fetch_one(app.pool())
+            .await
+            .unwrap();
+    assert!(last_click.is_some(), "email-click activity was recorded before attachment");
+
+    let (owner, claim_hash): (Option<Uuid>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT account_id, claim_token_hash FROM sites WHERE id = (SELECT site_id FROM crawls WHERE id = $1)",
+    )
+    .bind(crawl)
+    .fetch_one(app.pool())
+    .await
+    .unwrap();
+    assert_eq!(owner, Some(account), "the quick audit site was already attached");
+    assert!(claim_hash.is_none(), "the visitor claim token was cleared by the committed claim");
+
+    assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 1);
+    assert_eq!(
+        count(&app, "SELECT count(*) FROM crawls WHERE trigger = 'first' AND source = 'audit'").await,
+        1,
+        "the first full crawl was queued by the claim transaction"
+    );
+    assert_eq!(count(&app, "SELECT count(*) FROM events WHERE kind = 'email_given'").await, 1);
+    assert_eq!(
+        count(&app, "SELECT count(*) FROM events WHERE kind = 'link_clicked'").await,
+        0,
+        "the injected event write did not commit"
+    );
+
+    let retry = app.post(&format!("/auth/magic/{link}"), "", None).await;
+    assert_eq!(retry.status, StatusCode::BAD_REQUEST, "the consumed link cannot be retried");
 }
 
 #[tokio::test]
