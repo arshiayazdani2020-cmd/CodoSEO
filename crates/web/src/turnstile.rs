@@ -74,7 +74,6 @@ async fn verify_with(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +130,10 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
             String::from_utf8_lossy(&request).into_owned()
         });
-        (Url::parse(&format!("http://{address}/siteverify")).unwrap(), task)
+        (
+            Url::parse(&format!("http://{address}/siteverify")).unwrap(),
+            task,
+        )
     }
 
     #[tokio::test]
@@ -144,8 +146,14 @@ mod tests {
     async fn missing_blank_and_oversized_tokens_are_rejected_before_network_access() {
         let http = reqwest::Client::new();
         let cfg = config(Url::parse("http://127.0.0.1:1/siteverify").unwrap());
-        assert_eq!(verify_with(Some(&cfg), &http, None, None).await, Verdict::Failed);
-        assert_eq!(verify_with(Some(&cfg), &http, Some("  "), None).await, Verdict::Failed);
+        assert_eq!(
+            verify_with(Some(&cfg), &http, None, None).await,
+            Verdict::Failed
+        );
+        assert_eq!(
+            verify_with(Some(&cfg), &http, Some("  "), None).await,
+            Verdict::Failed
+        );
         assert_eq!(
             verify_with(Some(&cfg), &http, Some(&"x".repeat(2049)), None).await,
             Verdict::Failed
@@ -182,10 +190,17 @@ mod tests {
 
     #[tokio::test]
     async fn http_errors_and_unreadable_responses_fail_closed_as_unavailable() {
-        let (url, server) = fake_siteverify("503 Service Unavailable", r#"{"success":false}"#).await;
+        let (url, server) =
+            fake_siteverify("503 Service Unavailable", r#"{"success":false}"#).await;
         let cfg = config(url);
         assert_eq!(
-            verify_with(Some(&cfg), &reqwest::Client::new(), Some("valid-token"), None).await,
+            verify_with(
+                Some(&cfg),
+                &reqwest::Client::new(),
+                Some("valid-token"),
+                None
+            )
+            .await,
             Verdict::Unavailable
         );
         let _ = server.await.unwrap();
@@ -193,7 +208,13 @@ mod tests {
         let (url, server) = fake_siteverify("200 OK", "not-json").await;
         let cfg = config(url);
         assert_eq!(
-            verify_with(Some(&cfg), &reqwest::Client::new(), Some("valid-token"), None).await,
+            verify_with(
+                Some(&cfg),
+                &reqwest::Client::new(),
+                Some("valid-token"),
+                None
+            )
+            .await,
             Verdict::Unavailable
         );
         let _ = server.await.unwrap();

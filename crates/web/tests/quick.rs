@@ -709,7 +709,10 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
     let crawl = crawl_id(&started);
     let claim = claim_token(&started);
     finish(&app, crawl, messy_pages("example.com")).await;
-    assert_eq!(unlock(&app, crawl, "attach-fail@example.com").await.status, StatusCode::OK);
+    assert_eq!(
+        unlock(&app, crawl, "attach-fail@example.com").await.status,
+        StatusCode::OK
+    );
     let link = emailed_token(&app);
     inject_link_clicked_failure(&app).await;
 
@@ -721,7 +724,10 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
         )
         .await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(res.cookie("codoseo_session").is_none(), "no session cookie reaches the browser");
+    assert!(
+        res.cookie("codoseo_session").is_none(),
+        "no session cookie reaches the browser"
+    );
 
     let token_used: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM login_tokens WHERE token_hash = $1 AND used_at IS NOT NULL)",
@@ -738,7 +744,10 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
             .fetch_one(app.pool())
             .await
             .unwrap();
-    assert!(last_click.is_some(), "email-click activity was recorded before attachment");
+    assert!(
+        last_click.is_some(),
+        "email-click activity was recorded before attachment"
+    );
 
     let (owner, claim_hash): (Option<Uuid>, Option<Vec<u8>>) = sqlx::query_as(
         "SELECT account_id, claim_token_hash FROM sites WHERE id = (SELECT site_id FROM crawls WHERE id = $1)",
@@ -747,19 +756,44 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
     .fetch_one(app.pool())
     .await
     .unwrap();
-    assert_eq!(owner, Some(account), "the quick audit site was already attached");
-    assert!(claim_hash.is_none(), "the visitor claim token was cleared by the committed claim");
-
-    assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 0,
-        "no session is created until audit attachment and event recording succeed");
     assert_eq!(
-        count(&app, "SELECT count(*) FROM crawls WHERE trigger = 'first' AND source = 'audit'").await,
+        owner,
+        Some(account),
+        "the quick audit site was already attached"
+    );
+    assert!(
+        claim_hash.is_none(),
+        "the visitor claim token was cleared by the committed claim"
+    );
+
+    assert_eq!(
+        count(&app, "SELECT count(*) FROM sessions").await,
+        0,
+        "no session is created until audit attachment and event recording succeed"
+    );
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM crawls WHERE trigger = 'first' AND source = 'audit'"
+        )
+        .await,
         1,
         "the first full crawl was queued by the claim transaction"
     );
-    assert_eq!(count(&app, "SELECT count(*) FROM events WHERE kind = 'email_given'").await, 1);
     assert_eq!(
-        count(&app, "SELECT count(*) FROM events WHERE kind = 'link_clicked'").await,
+        count(
+            &app,
+            "SELECT count(*) FROM events WHERE kind = 'email_given'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM events WHERE kind = 'link_clicked'"
+        )
+        .await,
         0,
         "the injected event write did not commit"
     );
@@ -772,11 +806,22 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
             Some(&format!("{CLAIM_COOKIE}={claim}")),
         )
         .await;
-    assert_eq!(retry.status, StatusCode::SEE_OTHER, "the restored link can be retried");
+    assert_eq!(
+        retry.status,
+        StatusCode::SEE_OTHER,
+        "the restored link can be retried"
+    );
     assert!(retry.cookie("codoseo_session").is_some());
     assert!(retry.cookie(CLAIM_COOKIE).is_some());
     assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 1);
-    assert_eq!(count(&app, "SELECT count(*) FROM events WHERE kind = 'link_clicked'").await, 1);
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM events WHERE kind = 'link_clicked'"
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]
