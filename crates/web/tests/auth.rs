@@ -794,7 +794,8 @@ async fn github_callback_rejects_bad_cookie_missing_code_and_provider_error() {
         .get(&format!("/auth/github/callback?code=bad&state={state}"), Some(&cookie))
         .await;
     assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
-    assert_eq!(codes.lock().unwrap().as_slice(), &["bad"]);
+    assert_eq!(codes.lock().unwrap().len(), 1);
+    assert_eq!(codes.lock().unwrap()[0], "bad");
     assert_eq!(account_count(&app).await, 0);
     assert_eq!(session_count(&app).await, 0);
 }
