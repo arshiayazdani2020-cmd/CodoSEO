@@ -16,6 +16,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{CurrentUser, email, safe_next, session, signup_policy};
+use crate::abuse::{self, ClientIp};
 use crate::assets;
 use crate::auth::mailer::Email;
 use crate::error::AppError;
@@ -90,6 +91,7 @@ pub struct LoginForm {
 pub async fn request_link(
     State(state): State<AppState>,
     hx: Hx,
+    ClientIp(ip): ClientIp,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, AppError> {
     let next = safe_next(form.next.as_deref()).to_owned();
@@ -106,7 +108,15 @@ pub async fn request_link(
         return respond(card(&state, form.email.trim().to_owned(), next, err, false));
     };
 
-    let _ = issue_link(&state, address, &next, None).await?;
+    let today = time::OffsetDateTime::now_utc().date();
+    let mut ip_hashes = Vec::new();
+    if let Some(ip) = ip {
+        let hash_for = |day: time::Date| abuse::ip_hash(&state.config.secret_key, ip, day)
+            .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        ip_hashes.push(hash_for(today));
+        if let Some(yesterday) = today.previous_day() { ip_hashes.push(hash_for(yesterday)); }
+    }
+    let _ = issue_link(&state, address, &next, None, Some(&ip_hashes)).await?;
 
     respond(card(&state, address.to_owned(), next, None, true))
 }
@@ -123,6 +133,7 @@ pub enum LinkOutcome {
     Sent,
     /// An audit's unlock form already sent its share of emails this hour (nothing was sent).
     Throttled(UnlockSlot),
+    LoginThrottled,
 }
 
 /// Stores a magic-link token for `address` and emails the link. With an `audit`, the link also
@@ -133,21 +144,20 @@ pub async fn issue_link(
     address: &str,
     next: &str,
     audit: Option<AuditLink<'_>>,
+    login_ip_hashes: Option<&[String]>,
 ) -> Result<LinkOutcome, AppError> {
     let token = session::random_token();
     let token_hash = session::hash(&token);
     let mut payload = serde_json::json!({ "email": address, "next": next });
     match &audit {
         None => {
-            codoseo_store::auth::create_token(
-                &state.pool,
-                TokenPurpose::MagicLink,
-                &token_hash,
-                None,
-                Some(payload),
-                MAGIC_TTL,
-            )
-            .await?;
+            let canonical = email::canonical(address);
+            let allowed = codoseo_store::auth::create_login_link_token(
+                &state.pool, &canonical, login_ip_hashes.unwrap_or(&[]),
+                &token_hash, payload, MAGIC_TTL,
+                codoseo_store::auth::LoginLinkCaps::DEFAULT,
+            ).await?;
+            if !allowed { return Ok(LinkOutcome::LoginThrottled); }
         }
         Some(a) => {
             let canonical = email::canonical(address);
