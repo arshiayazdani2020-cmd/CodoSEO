@@ -266,27 +266,68 @@ async fn tokens_are_stored_hashed() {
 }
 
 #[tokio::test]
-async fn repeated_login_requests_for_the_same_email_are_not_app_rate_limited() {
+async fn repeated_login_requests_for_the_same_canonical_email_are_limited() {
     let app = TestApp::new().await;
-    let mut tokens = Vec::new();
-
-    // The ordinary /login flow is distinct from Quick Audit's per-recipient unlock caps.
-    for _ in 0..5 {
-        tokens.push(request_link(&app, "repeat@example.com", "/").await);
+    for email in ["Repeat@example.com", "repeat@example.com", "REPEAT@example.com"] {
+        request_link(&app, email, "/").await;
     }
-
-    let unique: std::collections::HashSet<_> = tokens.iter().collect();
-    assert_eq!(unique.len(), 5, "each request created a distinct magic link");
-    assert_eq!(app.mail.lock().unwrap().len(), 5, "all five emails were handed to the mailer");
-
+    let fourth = app.post("/login", "email=repeat%40example.com", None).await;
+    assert_eq!(fourth.status, StatusCode::OK);
+    assert!(fourth.body.contains("Check your email"));
+    assert_eq!(app.mail.lock().unwrap().len(), 3);
     let stored: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM login_tokens WHERE purpose = 'magic_link' AND payload->>'email' = $1",
-    )
-    .bind("repeat@example.com")
-    .fetch_one(app.pool())
-    .await
-    .unwrap();
-    assert_eq!(stored, 5, "all five magic-link tokens were stored");
+        "SELECT count(*) FROM login_tokens WHERE purpose = 'magic_link' AND payload->>'login_canonical' = $1",
+    ).bind("repeat@example.com").fetch_one(app.pool()).await.unwrap();
+    assert_eq!(stored, 3);
+}
+
+#[tokio::test]
+async fn concurrent_login_requests_cannot_race_past_the_recipient_cap() {
+    let app = TestApp::new().await;
+    let form = "email=race-limit%40example.com";
+    let (a, b, c, d, e) = tokio::join!(
+        app.post("/login", form, None), app.post("/login", form, None),
+        app.post("/login", form, None), app.post("/login", form, None),
+        app.post("/login", form, None),
+    );
+    for response in [a, b, c, d, e] {
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(response.body.contains("Check your email"));
+    }
+    assert_eq!(app.mail.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn login_requests_are_limited_per_client_ip_across_distinct_addresses() {
+    let config = Config::from_lookup(|k| match k {
+        "CODOSEO_MODE" => Some("cloud".into()),
+        "BASE_URL" => Some("https://codoseo.com".into()),
+        "SECRET_KEY" => Some("k".into()),
+        "SMTP_URL" => Some("smtp://127.0.0.1:2525".into()),
+        _ => None,
+    }).unwrap();
+    let app = TestApp::with_config(config).await;
+    for n in 0..10 {
+        let form = format!("email=user{n}%40example.com");
+        let res = app.post_with_headers("/login", &form, None,
+            &[("cf-connecting-ip", "203.0.113.77")]).await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+    let blocked = app.post_with_headers("/login", "email=another%40example.com", None,
+        &[("cf-connecting-ip", "203.0.113.77")]).await;
+    assert_eq!(blocked.status, StatusCode::OK);
+    assert!(blocked.body.contains("Check your email"));
+    assert_eq!(app.mail.lock().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn expired_login_rate_limit_entries_age_out_of_the_window() {
+    let app = TestApp::new().await;
+    for _ in 0..3 { request_link(&app, "window@example.com", "/").await; }
+    sqlx::query("UPDATE login_tokens SET created_at = now() - interval '61 minutes' WHERE payload->>'login_canonical' = $1")
+        .bind("window@example.com").execute(app.pool()).await.unwrap();
+    request_link(&app, "window@example.com", "/").await;
+    assert_eq!(app.mail.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]
