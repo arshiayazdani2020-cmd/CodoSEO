@@ -46,6 +46,6 @@ jobs:
       - name: Run Turnstile verification unit tests
         run: cargo test -p codoseo-web --lib turnstile::tests --locked
       - name: Run REST API and MCP security integration tests
-        run: cargo test -p codoseo-web --test api --test mcp_anon --test mcp_keyed --locked
+        run: cargo test -p codoseo-web --test api --test mcp_anon --test mcp_keyed --test quick --locked
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
