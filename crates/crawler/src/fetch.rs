@@ -407,7 +407,10 @@ mod redirect_security_tests {
             matches!(result, Err(FetchError::Blocked(_))),
             "expected hostname resolving to a private IP to be blocked, got {result:?}"
         );
-        assert_eq!(fetcher.requests(), 1, "second request must never be sent");
+        // Fetcher.requests counts attempted hops before DNS resolution, so the
+        // rejected redirect still increments it. The listener assertion below
+        // proves no TCP connection reached the private destination.
+        assert_eq!(fetcher.requests(), 2, "the redirect hop should be attempted");
 
         let private_request = tokio::time::timeout(
             Duration::from_millis(100),
