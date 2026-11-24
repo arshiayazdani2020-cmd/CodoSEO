@@ -121,6 +121,17 @@ async fn inject_write_failure(app: &TestApp, trigger_sql: &str) {
     sqlx::query(trigger_sql).execute(app.pool()).await.unwrap();
 }
 
+async fn remove_write_failure(app: &TestApp, table: &str) {
+    sqlx::query(&format!("DROP TRIGGER codoseo_test_fail_trigger ON {table}"))
+        .execute(app.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION codoseo_test_fail()")
+        .execute(app.pool())
+        .await
+        .unwrap();
+}
+
 async fn token_is_used(app: &TestApp, token: &str) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM login_tokens WHERE token_hash = $1 AND used_at IS NOT NULL)",
@@ -139,7 +150,7 @@ async fn session_count(app: &TestApp) -> i64 {
 }
 
 #[tokio::test]
-async fn magic_link_account_insert_failure_consumes_token_without_creating_account() {
+async fn magic_link_account_insert_failure_restores_token_for_retry() {
     let app = TestApp::new().await;
     let token = request_link(&app, "insert-fail@example.com", "/").await;
     inject_write_failure(
@@ -151,14 +162,18 @@ async fn magic_link_account_insert_failure_consumes_token_without_creating_accou
 
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(token_is_used(&app, &token).await);
+    assert!(!token_is_used(&app, &token).await);
     assert_eq!(account_count(&app).await, 0);
     assert_eq!(session_count(&app).await, 0);
-    assert_eq!(consume(&app, &token).await.0, StatusCode::BAD_REQUEST);
+
+    remove_write_failure(&app, "accounts").await;
+    assert_eq!(consume(&app, &token).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, 1);
 }
 
 #[tokio::test]
-async fn magic_link_session_insert_failure_leaves_account_but_no_session() {
+async fn magic_link_session_insert_failure_restores_token_for_retry() {
     let app = TestApp::new().await;
     let token = request_link(&app, "session-fail@example.com", "/").await;
     inject_write_failure(
@@ -170,13 +185,18 @@ async fn magic_link_session_insert_failure_leaves_account_but_no_session() {
 
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(token_is_used(&app, &token).await);
+    assert!(!token_is_used(&app, &token).await);
     assert_eq!(account_count(&app).await, 1);
     assert_eq!(session_count(&app).await, 0);
+
+    remove_write_failure(&app, "sessions").await;
+    assert_eq!(consume(&app, &token).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, 1);
 }
 
 #[tokio::test]
-async fn magic_link_touch_login_failure_leaves_session_without_returning_cookie() {
+async fn magic_link_touch_login_failure_restores_token_without_orphan_session() {
     let app = TestApp::new().await;
     app.login("touch-fail@example.com").await;
     let before = session_count(&app).await;
@@ -192,13 +212,19 @@ async fn magic_link_touch_login_failure_leaves_session_without_returning_cookie(
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(res.cookie("codoseo_session").is_none());
-    assert!(token_is_used(&app, &token).await);
+    assert!(!token_is_used(&app, &token).await);
     assert_eq!(account_count(&app).await, 1);
+    assert_eq!(session_count(&app).await, before);
+
+    remove_write_failure(&app, "accounts").await;
+    let retry = consume(&app, &token).await;
+    assert_eq!(retry.0, StatusCode::SEE_OTHER);
+    assert!(retry.1.is_some());
     assert_eq!(session_count(&app).await, before + 1);
 }
 
 #[tokio::test]
-async fn magic_link_email_click_failure_leaves_session_without_returning_cookie() {
+async fn magic_link_email_click_failure_restores_token_without_orphan_session() {
     let app = TestApp::new().await;
     app.login("click-fail@example.com").await;
     let before = session_count(&app).await;
@@ -214,9 +240,9 @@ async fn magic_link_email_click_failure_leaves_session_without_returning_cookie(
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(res.cookie("codoseo_session").is_none());
-    assert!(token_is_used(&app, &token).await);
+    assert!(!token_is_used(&app, &token).await);
     assert_eq!(account_count(&app).await, 1);
-    assert_eq!(session_count(&app).await, before + 1);
+    assert_eq!(session_count(&app).await, before);
     let click: Option<time::OffsetDateTime> =
         sqlx::query_scalar("SELECT last_email_click_at FROM accounts WHERE email = $1")
             .bind("click-fail@example.com")
@@ -224,6 +250,12 @@ async fn magic_link_email_click_failure_leaves_session_without_returning_cookie(
             .await
             .unwrap();
     assert!(click.is_none());
+
+    remove_write_failure(&app, "accounts").await;
+    let retry = consume(&app, &token).await;
+    assert_eq!(retry.0, StatusCode::SEE_OTHER);
+    assert!(retry.1.is_some());
+    assert_eq!(session_count(&app).await, before + 1);
 }
 
 #[tokio::test]
