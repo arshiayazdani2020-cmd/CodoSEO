@@ -133,26 +133,41 @@ pub async fn live_token_payload(
 
 /// Caps for ordinary sign-in email requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LoginLinkCaps { pub per_address_per_hour: i64, pub per_ip_per_hour: i64 }
+pub struct LoginLinkCaps {
+    pub per_address_per_hour: i64,
+    pub per_ip_per_hour: i64,
+}
 impl LoginLinkCaps {
-    pub const DEFAULT: LoginLinkCaps = LoginLinkCaps { per_address_per_hour: 3, per_ip_per_hour: 10 };
+    pub const DEFAULT: LoginLinkCaps = LoginLinkCaps {
+        per_address_per_hour: 3,
+        per_ip_per_hour: 10,
+    };
 }
 
 /// Atomically checks ordinary-login email limits and stores the token. IP hashes are daily
 /// salted; callers pass today's and yesterday's hashes so a rolling hour survives UTC midnight.
 pub async fn create_login_link_token(
-    pool: &PgPool, canonical: &str, ip_hashes: &[String], token_hash: &[u8],
-    mut payload: serde_json::Value, ttl: Duration, caps: LoginLinkCaps,
+    pool: &PgPool,
+    canonical: &str,
+    ip_hashes: &[String],
+    token_hash: &[u8],
+    mut payload: serde_json::Value,
+    ttl: Duration,
+    caps: LoginLinkCaps,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('codoseo.login.email:' || $1))")
-        .bind(canonical).execute(&mut *tx).await?;
+        .bind(canonical)
+        .execute(&mut *tx)
+        .await?;
     let mut lock_keys = ip_hashes.to_vec();
     lock_keys.sort();
     lock_keys.dedup();
     for key in &lock_keys {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('codoseo.login.ip:' || $1))")
-            .bind(key).execute(&mut *tx).await?;
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
     }
     let (address_count, ip_count): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE payload->>'login_canonical' = $1), \
@@ -160,21 +175,31 @@ pub async fn create_login_link_token(
          FROM login_tokens WHERE purpose = 'magic_link' \
            AND payload->>'login_source' = 'login' \
            AND created_at > now() - interval '1 hour'",
-    ).bind(canonical).bind(ip_hashes).fetch_one(&mut *tx).await?;
+    )
+    .bind(canonical)
+    .bind(ip_hashes)
+    .fetch_one(&mut *tx)
+    .await?;
     if address_count >= caps.per_address_per_hour
-        || (!ip_hashes.is_empty() && ip_count >= caps.per_ip_per_hour) {
+        || (!ip_hashes.is_empty() && ip_count >= caps.per_ip_per_hour)
+    {
         tx.commit().await?;
         return Ok(false);
     }
     payload["login_source"] = serde_json::json!("login");
     payload["login_canonical"] = serde_json::json!(canonical);
-    payload["login_ip_hash"] = ip_hashes.first()
+    payload["login_ip_hash"] = ip_hashes
+        .first()
         .map_or(serde_json::Value::Null, |hash| serde_json::json!(hash));
     sqlx::query(
         "INSERT INTO login_tokens (purpose, token_hash, payload, expires_at) \
          VALUES ('magic_link', $1, $2, now() + make_interval(secs => $3))",
-    ).bind(token_hash).bind(payload).bind(ttl.as_seconds_f64())
-     .execute(&mut *tx).await?;
+    )
+    .bind(token_hash)
+    .bind(payload)
+    .bind(ttl.as_seconds_f64())
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(true)
 }

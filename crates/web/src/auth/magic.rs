@@ -111,10 +111,16 @@ pub async fn request_link(
     let today = time::OffsetDateTime::now_utc().date();
     let mut ip_hashes = Vec::new();
     if let Some(ip) = ip {
-        let hash_for = |day: time::Date| abuse::ip_hash(&state.config.secret_key, ip, day)
-            .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hash_for = |day: time::Date| {
+            abuse::ip_hash(&state.config.secret_key, ip, day)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
         ip_hashes.push(hash_for(today));
-        if let Some(yesterday) = today.previous_day() { ip_hashes.push(hash_for(yesterday)); }
+        if let Some(yesterday) = today.previous_day() {
+            ip_hashes.push(hash_for(yesterday));
+        }
     }
     let _ = issue_link(&state, address, &next, None, Some(&ip_hashes)).await?;
 
@@ -153,11 +159,18 @@ pub async fn issue_link(
         None => {
             let canonical = email::canonical(address);
             let allowed = codoseo_store::auth::create_login_link_token(
-                &state.pool, &canonical, login_ip_hashes.unwrap_or(&[]),
-                &token_hash, payload, MAGIC_TTL,
+                &state.pool,
+                &canonical,
+                login_ip_hashes.unwrap_or(&[]),
+                &token_hash,
+                payload,
+                MAGIC_TTL,
                 codoseo_store::auth::LoginLinkCaps::DEFAULT,
-            ).await?;
-            if !allowed { return Ok(LinkOutcome::LoginThrottled); }
+            )
+            .await?;
+            if !allowed {
+                return Ok(LinkOutcome::LoginThrottled);
+            }
         }
         Some(a) => {
             let canonical = email::canonical(address);
@@ -233,26 +246,21 @@ pub async fn consume(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let token_hash = session::hash(&token);
-    let used = codoseo_store::auth::consume_token(
-        &state.pool,
-        TokenPurpose::MagicLink,
-        &token_hash,
-    )
-    .await?
-    .ok_or_else(|| {
-        AppError::BadRequest(
-            "This sign-in link has expired or was already used. Ask for a new one.".to_owned(),
-        )
-    })?;
+    let used =
+        codoseo_store::auth::consume_token(&state.pool, TokenPurpose::MagicLink, &token_hash)
+            .await?
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "This sign-in link has expired or was already used. Ask for a new one."
+                        .to_owned(),
+                )
+            })?;
 
     let payload = used.payload.unwrap_or_default();
     let result = complete_magic_sign_in(&state, payload, &headers).await;
     // Only transient/internal processing failures are retryable. Permanent policy or request
     // errors (for example, signups being closed) must leave the token consumed.
-    let should_restore = matches!(
-        &result,
-        Err(AppError::Unavailable | AppError::Internal(_))
-    );
+    let should_restore = matches!(&result, Err(AppError::Unavailable | AppError::Internal(_)));
     if should_restore {
         match codoseo_store::auth::unconsume_token(
             &state.pool,
@@ -261,9 +269,15 @@ pub async fn consume(
         )
         .await
         {
-            Ok(true) => tracing::warn!("magic-link processing failed; the unexpired token was restored for retry"),
-            Ok(false) => tracing::error!("magic-link processing failed and its token could not be restored"),
-            Err(error) => tracing::error!(%error, "magic-link processing failed and token recovery also failed"),
+            Ok(true) => tracing::warn!(
+                "magic-link processing failed; the unexpired token was restored for retry"
+            ),
+            Ok(false) => {
+                tracing::error!("magic-link processing failed and its token could not be restored")
+            }
+            Err(error) => {
+                tracing::error!(%error, "magic-link processing failed and token recovery also failed")
+            }
         }
     }
     result

@@ -410,13 +410,14 @@ mod redirect_security_tests {
         // Fetcher.requests counts attempted hops before DNS resolution, so the
         // rejected redirect still increments it. The listener assertion below
         // proves no TCP connection reached the private destination.
-        assert_eq!(fetcher.requests(), 2, "the redirect hop should be attempted");
+        assert_eq!(
+            fetcher.requests(),
+            2,
+            "the redirect hop should be attempted"
+        );
 
-        let private_request = tokio::time::timeout(
-            Duration::from_millis(100),
-            private_fixture.accept(),
-        )
-        .await;
+        let private_request =
+            tokio::time::timeout(Duration::from_millis(100), private_fixture.accept()).await;
         assert!(
             private_request.is_err(),
             "private redirect destination unexpectedly received a connection"
@@ -460,8 +461,11 @@ mod redirect_security_tests {
             sent: AtomicU32::new(0),
         };
 
-        let start = Url::parse(&format!("http://public-fixture.test:{}/start", public_addr.port()))
-            .unwrap();
+        let start = Url::parse(&format!(
+            "http://public-fixture.test:{}/start",
+            public_addr.port()
+        ))
+        .unwrap();
         let result = fetcher.fetch(&start).await;
         response_task.await.unwrap();
 
@@ -471,11 +475,8 @@ mod redirect_security_tests {
         );
         assert_eq!(fetcher.requests(), 1, "second request must never be sent");
 
-        let private_request = tokio::time::timeout(
-            Duration::from_millis(100),
-            private_fixture.accept(),
-        )
-        .await;
+        let private_request =
+            tokio::time::timeout(Duration::from_millis(100), private_fixture.accept()).await;
         assert!(
             private_request.is_err(),
             "private redirect destination unexpectedly received a connection"

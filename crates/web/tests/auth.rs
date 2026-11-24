@@ -85,18 +85,21 @@ async fn two_concurrent_posts_can_consume_a_magic_link_only_once() {
     let token = request_link(&app, "race@example.com", "/").await;
 
     let path = format!("/auth/magic/{token}");
-    let (first, second) = tokio::join!(
-        app.post(&path, "", None),
-        app.post(&path, "", None),
-    );
+    let (first, second) = tokio::join!(app.post(&path, "", None), app.post(&path, "", None),);
     let statuses = [first.status, second.status];
     assert_eq!(
-        statuses.iter().filter(|s| **s == StatusCode::SEE_OTHER).count(),
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::SEE_OTHER)
+            .count(),
         1,
         "{statuses:?}"
     );
     assert_eq!(
-        statuses.iter().filter(|s| **s == StatusCode::BAD_REQUEST).count(),
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::BAD_REQUEST)
+            .count(),
         1,
         "{statuses:?}"
     );
@@ -122,10 +125,12 @@ async fn inject_write_failure(app: &TestApp, trigger_sql: &str) {
 }
 
 async fn remove_write_failure(app: &TestApp, table: &str) {
-    sqlx::query(&format!("DROP TRIGGER codoseo_test_fail_trigger ON {table}"))
-        .execute(app.pool())
-        .await
-        .unwrap();
+    sqlx::query(&format!(
+        "DROP TRIGGER codoseo_test_fail_trigger ON {table}"
+    ))
+    .execute(app.pool())
+    .await
+    .unwrap();
     sqlx::query("DROP FUNCTION codoseo_test_fail()")
         .execute(app.pool())
         .await
@@ -300,7 +305,11 @@ async fn tokens_are_stored_hashed() {
 #[tokio::test]
 async fn repeated_login_requests_for_the_same_canonical_email_are_limited() {
     let app = TestApp::new().await;
-    for email in ["Repeat@example.com", "repeat@example.com", "REPEAT@example.com"] {
+    for email in [
+        "Repeat@example.com",
+        "repeat@example.com",
+        "REPEAT@example.com",
+    ] {
         request_link(&app, email, "/").await;
     }
     let fourth = app.post("/login", "email=repeat%40example.com", None).await;
@@ -318,8 +327,10 @@ async fn concurrent_login_requests_cannot_race_past_the_recipient_cap() {
     let app = TestApp::new().await;
     let form = "email=race-limit%40example.com";
     let (a, b, c, d, e) = tokio::join!(
-        app.post("/login", form, None), app.post("/login", form, None),
-        app.post("/login", form, None), app.post("/login", form, None),
+        app.post("/login", form, None),
+        app.post("/login", form, None),
+        app.post("/login", form, None),
+        app.post("/login", form, None),
         app.post("/login", form, None),
     );
     for response in [a, b, c, d, e] {
@@ -337,16 +348,29 @@ async fn login_requests_are_limited_per_client_ip_across_distinct_addresses() {
         "SECRET_KEY" => Some("k".into()),
         "SMTP_URL" => Some("smtp://127.0.0.1:2525".into()),
         _ => None,
-    }).unwrap();
+    })
+    .unwrap();
     let app = TestApp::with_config(config).await;
     for n in 0..10 {
         let form = format!("email=user{n}%40example.com");
-        let res = app.post_with_headers("/login", &form, None,
-            &[("cf-connecting-ip", "203.0.113.77")]).await;
+        let res = app
+            .post_with_headers(
+                "/login",
+                &form,
+                None,
+                &[("cf-connecting-ip", "203.0.113.77")],
+            )
+            .await;
         assert_eq!(res.status, StatusCode::OK);
     }
-    let blocked = app.post_with_headers("/login", "email=another%40example.com", None,
-        &[("cf-connecting-ip", "203.0.113.77")]).await;
+    let blocked = app
+        .post_with_headers(
+            "/login",
+            "email=another%40example.com",
+            None,
+            &[("cf-connecting-ip", "203.0.113.77")],
+        )
+        .await;
     assert_eq!(blocked.status, StatusCode::OK);
     assert!(blocked.body.contains("Check your email"));
     assert_eq!(app.mail.lock().unwrap().len(), 10);
@@ -355,7 +379,9 @@ async fn login_requests_are_limited_per_client_ip_across_distinct_addresses() {
 #[tokio::test]
 async fn expired_login_rate_limit_entries_age_out_of_the_window() {
     let app = TestApp::new().await;
-    for _ in 0..3 { request_link(&app, "window@example.com", "/").await; }
+    for _ in 0..3 {
+        request_link(&app, "window@example.com", "/").await;
+    }
     sqlx::query("UPDATE login_tokens SET created_at = now() - interval '61 minutes' WHERE payload->>'login_canonical' = $1")
         .bind("window@example.com").execute(app.pool()).await.unwrap();
     request_link(&app, "window@example.com", "/").await;
@@ -431,16 +457,26 @@ async fn csrf_origin_matching_rejects_lookalikes_null_and_wrong_ports() {
         let mut builder = axum::http::Request::post("/login")
             .header("origin", origin)
             .header("content-type", "application/x-www-form-urlencoded");
-        if let Some(referer) = referer { builder = builder.header("referer", referer); }
-        builder.body(axum::body::Body::from("email=csrf%40example.com")).unwrap()
+        if let Some(referer) = referer {
+            builder = builder.header("referer", referer);
+        }
+        builder
+            .body(axum::body::Body::from("email=csrf%40example.com"))
+            .unwrap()
     };
 
     let lookalike = format!("{expected}.evil.example");
-    assert_eq!(app.send(request(&lookalike, None)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.send(request(&lookalike, None)).await.status,
+        StatusCode::FORBIDDEN
+    );
 
     // A null Origin is untrusted; a same-site Referer must not override it.
     let same_referer = format!("{expected}/login");
-    assert_eq!(app.send(request("null", Some(&same_referer))).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.send(request("null", Some(&same_referer))).await.status,
+        StatusCode::FORBIDDEN
+    );
 
     let parsed = url::Url::parse(&expected).unwrap();
     let wrong_port = format!(
@@ -449,11 +485,16 @@ async fn csrf_origin_matching_rejects_lookalikes_null_and_wrong_ports() {
         parsed.host_str().unwrap(),
         if parsed.port() == Some(444) { 445 } else { 444 }
     );
-    assert_eq!(app.send(request(&wrong_port, None)).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.send(request(&wrong_port, None)).await.status,
+        StatusCode::FORBIDDEN
+    );
 
     // Exact Origin is authoritative even if a stale Referer disagrees.
     assert_eq!(
-        app.send(request(&expected, Some("https://evil.example/"))).await.status,
+        app.send(request(&expected, Some("https://evil.example/")))
+            .await
+            .status,
         StatusCode::OK
     );
 }
@@ -463,18 +504,30 @@ async fn csrf_checks_every_unsafe_method_but_not_safe_methods() {
     let app = TestApp::new().await;
     for method in ["PUT", "PATCH", "DELETE"] {
         let req = axum::http::Request::builder()
-            .method(method).uri("/logout")
+            .method(method)
+            .uri("/logout")
             .header("origin", "https://evil.example")
-            .body(axum::body::Body::empty()).unwrap();
-        assert_eq!(app.send(req).await.status, StatusCode::FORBIDDEN, "{method}");
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.send(req).await.status,
+            StatusCode::FORBIDDEN,
+            "{method}"
+        );
     }
 
     for method in ["GET", "HEAD", "OPTIONS"] {
         let req = axum::http::Request::builder()
-            .method(method).uri("/logout")
+            .method(method)
+            .uri("/logout")
             .header("origin", "https://evil.example")
-            .body(axum::body::Body::empty()).unwrap();
-        assert_ne!(app.send(req).await.status, StatusCode::FORBIDDEN, "{method}");
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_ne!(
+            app.send(req).await.status,
+            StatusCode::FORBIDDEN,
+            "{method}"
+        );
     }
 }
 
@@ -555,8 +608,10 @@ async fn first_selfhosted_signup_becomes_owner_and_signups_can_close() {
     let res = app.post(&format!("/auth/magic/{token}"), "", None).await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     assert!(res.body.contains("Signups are closed"));
-    assert!(token_is_used(&app, &token).await,
-        "a permanent signup-policy refusal must not restore the consumed link");
+    assert!(
+        token_is_used(&app, &token).await,
+        "a permanent signup-policy refusal must not restore the consumed link"
+    );
     let token = request_link(&app, "member@example.com", "/").await;
     assert_eq!(consume(&app, &token).await.0, StatusCode::SEE_OTHER);
     assert_eq!(account_count(&app).await, 2);
@@ -748,7 +803,10 @@ async fn github_error_callback_clears_oauth_cookie_and_missing_cookie_is_rejecte
     let oauth_cookie = start.cookie("codoseo_oauth").expect("OAuth state cookie");
 
     let cancelled = app
-        .get("/auth/github/callback?error=access_denied", Some(&oauth_cookie))
+        .get(
+            "/auth/github/callback?error=access_denied",
+            Some(&oauth_cookie),
+        )
         .await;
     assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
     assert_eq!(cancelled.location(), Some("/login"));
@@ -759,13 +817,13 @@ async fn github_error_callback_clears_oauth_cookie_and_missing_cookie_is_rejecte
     assert!(clear.contains("Max-Age=0"), "{clear}");
 
     let no_cookie = app
-        .get(
-            "/auth/github/callback?code=good&state=some-state",
-            None,
-        )
+        .get("/auth/github/callback?code=good&state=some-state", None)
         .await;
     assert_eq!(no_cookie.status, StatusCode::BAD_REQUEST);
-    assert!(codes.lock().unwrap().is_empty(), "GitHub must not be called");
+    assert!(
+        codes.lock().unwrap().is_empty(),
+        "GitHub must not be called"
+    );
 }
 
 #[tokio::test]
@@ -777,23 +835,37 @@ async fn github_callback_rejects_bad_cookie_missing_code_and_provider_error() {
     let start = app.get("/auth/github?next=/account", None).await;
     assert_eq!(start.status, StatusCode::SEE_OTHER);
     let authorize = url::Url::parse(start.location().unwrap()).unwrap();
-    let state = authorize.query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
+    let state = authorize
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
     let cookie = start.cookie("codoseo_oauth").unwrap();
 
     let forged_cookie = app
-        .get(&format!("/auth/github/callback?code=good&state={state}"), Some("codoseo_oauth=forged"))
+        .get(
+            &format!("/auth/github/callback?code=good&state={state}"),
+            Some("codoseo_oauth=forged"),
+        )
         .await;
     assert_eq!(forged_cookie.status, StatusCode::BAD_REQUEST);
     assert!(codes.lock().unwrap().is_empty());
 
     let missing_code = app
-        .get(&format!("/auth/github/callback?state={state}"), Some(&cookie))
+        .get(
+            &format!("/auth/github/callback?state={state}"),
+            Some(&cookie),
+        )
         .await;
     assert_eq!(missing_code.status, StatusCode::BAD_REQUEST);
     assert!(codes.lock().unwrap().is_empty());
 
     let rejected = app
-        .get(&format!("/auth/github/callback?code=bad&state={state}"), Some(&cookie))
+        .get(
+            &format!("/auth/github/callback?code=bad&state={state}"),
+            Some(&cookie),
+        )
         .await;
     assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
     assert_eq!(codes.lock().unwrap().len(), 1);
