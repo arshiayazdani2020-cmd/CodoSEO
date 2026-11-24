@@ -294,17 +294,28 @@ async fn complete_magic_sign_in(
     // session row that the browser never received.
     codoseo_store::accounts::record_email_click(&state.pool, account.id).await?;
 
+    // Create the session before the Quick Audit's final event write. If attachment fails,
+    // revoke this not-yet-delivered session before restoring the magic link for retry.
+    let cookie = session::start(state, account.id).await?;
+
     // A link from the no-signup audit also attaches the audited site to the account.
     let audit = payload["audit"]
         .as_str()
         .and_then(|a| Uuid::parse_str(a).ok());
     let destination = if let Some(audit) = audit {
-        crate::routes::quick::attach_after_login(state, &account, audit, headers).await?
+        match crate::routes::quick::attach_after_login(state, &account, audit, headers).await {
+            Ok(destination) => destination,
+            Err(error) => {
+                if let Err(revoke_error) = session::revoke_cookie(state, &cookie).await {
+                    tracing::error!(%revoke_error, "could not revoke a session after Quick Audit attachment failed");
+                }
+                return Err(error);
+            }
+        }
     } else {
         next
     };
 
-    let cookie = session::start(state, account.id).await?;
     if audit.is_some() {
         let spent = crate::routes::quick::clear_claim_cookie(state);
         Ok((
