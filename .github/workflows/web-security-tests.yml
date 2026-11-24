@@ -11,6 +11,15 @@ on:
       - "crates/core/**"
       - "Cargo.toml"
       - "Cargo.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/web-security-tests.yml"
+      - "crates/web/**"
+      - "crates/mcp/**"
+      - "crates/store/**"
+      - "crates/core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 
 permissions:
