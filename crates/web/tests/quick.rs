@@ -70,6 +70,17 @@ async fn inject_link_clicked_failure(app: &TestApp) {
     .unwrap();
 }
 
+async fn remove_link_clicked_failure(app: &TestApp) {
+    sqlx::query("DROP TRIGGER codoseo_test_fail_link_clicked_trigger ON events")
+        .execute(app.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION codoseo_test_fail_link_clicked()")
+        .execute(app.pool())
+        .await
+        .unwrap();
+}
+
 /// A site with a spread of defects, so the audit has more than five failing checks.
 fn messy_pages(domain: &str) -> Vec<codoseo_core::page::PageRecord> {
     let mut pages = vec![page(domain, "/")];
@@ -719,7 +730,7 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
     .fetch_one(app.pool())
     .await
     .unwrap();
-    assert!(token_used, "the magic-link token was consumed");
+    assert!(!token_used, "the magic-link token was restored for retry");
 
     let (account, last_click): (Uuid, Option<time::OffsetDateTime>) =
         sqlx::query_as("SELECT id, last_email_click_at FROM accounts WHERE email = $1")
@@ -739,7 +750,8 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
     assert_eq!(owner, Some(account), "the quick audit site was already attached");
     assert!(claim_hash.is_none(), "the visitor claim token was cleared by the committed claim");
 
-    assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 1);
+    assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 0,
+        "no session is created until audit attachment and event recording succeed");
     assert_eq!(
         count(&app, "SELECT count(*) FROM crawls WHERE trigger = 'first' AND source = 'audit'").await,
         1,
@@ -752,8 +764,19 @@ async fn audit_magic_link_event_failure_leaves_claimed_site_and_session_without_
         "the injected event write did not commit"
     );
 
-    let retry = app.post(&format!("/auth/magic/{link}"), "", None).await;
-    assert_eq!(retry.status, StatusCode::BAD_REQUEST, "the consumed link cannot be retried");
+    remove_link_clicked_failure(&app).await;
+    let retry = app
+        .post(
+            &format!("/auth/magic/{link}"),
+            "",
+            Some(&format!("{CLAIM_COOKIE}={claim}")),
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::SEE_OTHER, "the restored link can be retried");
+    assert!(retry.cookie("codoseo_session").is_some());
+    assert!(retry.cookie(CLAIM_COOKIE).is_some());
+    assert_eq!(count(&app, "SELECT count(*) FROM sessions").await, 1);
+    assert_eq!(count(&app, "SELECT count(*) FROM events WHERE kind = 'link_clicked'").await, 1);
 }
 
 #[tokio::test]
