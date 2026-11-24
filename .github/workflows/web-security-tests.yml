@@ -43,6 +43,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal
       - uses: Swatinem/rust-cache@v2
+      - name: Run Turnstile verification unit tests
+        run: cargo test -p codoseo-web --lib turnstile::tests --locked
       - name: Run REST API and MCP security integration tests
         run: cargo test -p codoseo-web --test api --test mcp_anon --test mcp_keyed --locked
         env:
