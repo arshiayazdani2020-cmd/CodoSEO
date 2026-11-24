@@ -423,6 +423,62 @@ async fn cross_origin_posts_are_rejected() {
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn csrf_origin_matching_rejects_lookalikes_null_and_wrong_ports() {
+    let app = TestApp::new().await;
+    let expected = app.origin();
+
+    let request = |origin: &str, referer: Option<&str>| {
+        let mut builder = axum::http::Request::post("/login")
+            .header("origin", origin)
+            .header("content-type", "application/x-www-form-urlencoded");
+        if let Some(referer) = referer { builder = builder.header("referer", referer); }
+        builder.body(axum::body::Body::from("email=csrf%40example.com")).unwrap()
+    };
+
+    let lookalike = format!("{expected}.evil.example");
+    assert_eq!(app.send(request(&lookalike, None)).await.status, StatusCode::FORBIDDEN);
+
+    // A null Origin is untrusted; a same-site Referer must not override it.
+    let same_referer = format!("{expected}/login");
+    assert_eq!(app.send(request("null", Some(&same_referer))).await.status, StatusCode::FORBIDDEN);
+
+    let parsed = url::Url::parse(&expected).unwrap();
+    let wrong_port = format!(
+        "{}://{}:{}/",
+        parsed.scheme(),
+        parsed.host_str().unwrap(),
+        if parsed.port() == Some(444) { 445 } else { 444 }
+    );
+    assert_eq!(app.send(request(&wrong_port, None)).await.status, StatusCode::FORBIDDEN);
+
+    // Exact Origin is authoritative even if a stale Referer disagrees.
+    assert_eq!(
+        app.send(request(&expected, Some("https://evil.example/"))).await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn csrf_checks_every_unsafe_method_but_not_safe_methods() {
+    let app = TestApp::new().await;
+    for method in ["PUT", "PATCH", "DELETE"] {
+        let req = axum::http::Request::builder()
+            .method(method).uri("/logout")
+            .header("origin", "https://evil.example")
+            .body(axum::body::Body::empty()).unwrap();
+        assert_eq!(app.send(req).await.status, StatusCode::FORBIDDEN, "{method}");
+    }
+
+    for method in ["GET", "HEAD", "OPTIONS"] {
+        let req = axum::http::Request::builder()
+            .method(method).uri("/logout")
+            .header("origin", "https://evil.example")
+            .body(axum::body::Body::empty()).unwrap();
+        assert_ne!(app.send(req).await.status, StatusCode::FORBIDDEN, "{method}");
+    }
+}
+
+#[tokio::test]
 async fn another_accounts_site_is_not_found() {
     let app = TestApp::new().await;
     let (ana, _) = app.login("ana@example.com").await;
@@ -662,6 +718,14 @@ async fn github_sign_in_links_to_the_email_account() {
     assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
     assert_eq!(res.location(), Some("/account"));
     assert!(res.cookie("codoseo_session").is_some());
+    let cleared_state = res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("codoseo_oauth="))
+        .expect("OAuth state cookie is cleared after success");
+    assert!(cleared_state.contains("Max-Age=0"), "{cleared_state}");
 
     assert_eq!(account_count(&app).await, 1);
     let github_id: Option<String> = sqlx::query_scalar("SELECT github_id FROM accounts")
@@ -700,6 +764,39 @@ async fn github_error_callback_clears_oauth_cookie_and_missing_cookie_is_rejecte
         .await;
     assert_eq!(no_cookie.status, StatusCode::BAD_REQUEST);
     assert!(codes.lock().unwrap().is_empty(), "GitHub must not be called");
+}
+
+#[tokio::test]
+async fn github_callback_rejects_bad_cookie_missing_code_and_provider_error() {
+    let codes = Arc::new(Mutex::new(Vec::new()));
+    let gh = fake_github(codes.clone()).await;
+    let app = TestApp::with_config(github_config(&gh)).await;
+
+    let start = app.get("/auth/github?next=/account", None).await;
+    assert_eq!(start.status, StatusCode::SEE_OTHER);
+    let authorize = url::Url::parse(start.location().unwrap()).unwrap();
+    let state = authorize.query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
+    let cookie = start.cookie("codoseo_oauth").unwrap();
+
+    let forged_cookie = app
+        .get(&format!("/auth/github/callback?code=good&state={state}"), Some("codoseo_oauth=forged"))
+        .await;
+    assert_eq!(forged_cookie.status, StatusCode::BAD_REQUEST);
+    assert!(codes.lock().unwrap().is_empty());
+
+    let missing_code = app
+        .get(&format!("/auth/github/callback?state={state}"), Some(&cookie))
+        .await;
+    assert_eq!(missing_code.status, StatusCode::BAD_REQUEST);
+    assert!(codes.lock().unwrap().is_empty());
+
+    let rejected = app
+        .get(&format!("/auth/github/callback?code=bad&state={state}"), Some(&cookie))
+        .await;
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+    assert_eq!(codes.lock().unwrap().as_slice(), &["bad"]);
+    assert_eq!(account_count(&app).await, 0);
+    assert_eq!(session_count(&app).await, 0);
 }
 
 #[tokio::test]
