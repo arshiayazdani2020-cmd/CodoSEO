@@ -80,6 +80,34 @@ async fn magic_link_signs_in_and_returns_to_next() {
 }
 
 #[tokio::test]
+async fn two_concurrent_posts_can_consume_a_magic_link_only_once() {
+    let app = TestApp::new().await;
+    let token = request_link(&app, "race@example.com", "/").await;
+
+    let (first, second) = tokio::join!(
+        app.post(&format!("/auth/magic/{token}"), "", None),
+        app.post(&format!("/auth/magic/{token}"), "", None),
+    );
+    let statuses = [first.status, second.status];
+    assert_eq!(
+        statuses.iter().filter(|s| **s == StatusCode::SEE_OTHER).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|s| **s == StatusCode::BAD_REQUEST).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert_eq!(account_count(&app).await, 1);
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(app.pool())
+        .await
+        .unwrap();
+    assert_eq!(sessions, 1);
+}
+
+#[tokio::test]
 async fn reused_and_expired_tokens_are_rejected() {
     let app = TestApp::new().await;
     let token = request_link(&app, "ana@example.com", "/").await;
@@ -425,6 +453,37 @@ async fn github_sign_in_links_to_the_email_account() {
         .await
         .unwrap();
     assert_eq!(github_id.as_deref(), Some("4242"));
+}
+
+#[tokio::test]
+async fn github_error_callback_clears_oauth_cookie_and_missing_cookie_is_rejected() {
+    let codes = Arc::new(Mutex::new(Vec::new()));
+    let gh = fake_github(codes.clone()).await;
+    let app = TestApp::with_config(github_config(&gh)).await;
+
+    let start = app.get("/auth/github?next=/account", None).await;
+    assert_eq!(start.status, StatusCode::SEE_OTHER);
+    let oauth_cookie = start.cookie("codoseo_oauth").expect("OAuth state cookie");
+
+    let cancelled = app
+        .get("/auth/github/callback?error=access_denied", Some(&oauth_cookie))
+        .await;
+    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
+    assert_eq!(cancelled.location(), Some("/login"));
+    let clear = cancelled
+        .header("set-cookie")
+        .expect("OAuth state cookie is cleared");
+    assert!(clear.contains("codoseo_oauth="), "{clear}");
+    assert!(clear.contains("Max-Age=0"), "{clear}");
+
+    let no_cookie = app
+        .get(
+            "/auth/github/callback?code=good&state=some-state",
+            None,
+        )
+        .await;
+    assert_eq!(no_cookie.status, StatusCode::BAD_REQUEST);
+    assert!(codes.lock().unwrap().is_empty(), "GitHub must not be called");
 }
 
 #[tokio::test]
