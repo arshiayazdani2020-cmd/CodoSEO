@@ -1,0 +1,90 @@
+name: RAJ dependency candidate (read-only)
+
+# Temporary evaluation workflow: resolve a candidate lockfile and print its diff.
+# No Git push, package publishing, deployment or real service credentials.
+on:
+  pull_request:
+    branches: [security/magic-link-recovery]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'security/ci-remediation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install repository toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal -c rustfmt -c clippy
+      - name: Verify formatting
+        run: cargo fmt --all --check
+      - name: Resolve narrowly scoped security updates
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import tomllib
+
+          targets = [
+              ("rmcp", "3.9.0"),
+              ("lettre", "0.11.24"),
+              ("url", "2.5.9"),
+              ("tokio", "1.53.3"),
+              ("webpki-roots", "1.0.10"),
+              ("webpki-root-certs", "1.0.10"),
+              ("rustls-webpki", "0.103.16"),
+              ("ctutils", "0.4.4"),
+          ]
+          def version(v):
+              return tuple(map(int, v.split(".")))
+          for name, target in targets:
+              with open("Cargo.lock", "rb") as f:
+                  packages = tomllib.load(f)["package"]
+              minimum = version(target)
+              versions = [
+                  p["version"] for p in packages if p["name"] == name
+                  and "-" not in p["version"]
+                  and version(p["version"])[0] == minimum[0]
+                  and (minimum[0] != 0 or version(p["version"])[1] == minimum[1])
+              ]
+              if not versions:
+                  raise SystemExit(f"No matching dependency family for {name}")
+              for current in versions:
+                  if version(current) < minimum:
+                      subprocess.run(["cargo", "update", "-p", f"{name}@{current}", "--precise", target], check=True)
+          PY
+      - name: Emit candidate lockfile patch for independent review
+        if: always()
+        run: |
+          echo 'RAJ_LOCK_PATCH_BEGIN'
+          git --no-pager diff --no-ext-diff -- Cargo.lock
+          echo 'RAJ_LOCK_PATCH_END'
+      - name: Check candidate dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: Clippy on candidate
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test candidate workspace
+        run: cargo test --locked --workspace
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
