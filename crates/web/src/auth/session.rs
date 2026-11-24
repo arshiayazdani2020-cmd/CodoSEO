@@ -27,6 +27,21 @@ pub fn hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+/// Revokes a session represented by the cookie value before it is sent to the browser.
+pub async fn revoke_cookie(state: &AppState, cookie: &HeaderValue) -> Result<(), AppError> {
+    let value = cookie
+        .to_str()
+        .map_err(|_| AppError::internal("invalid session cookie header"))?;
+    let token = value
+        .split(';')
+        .next()
+        .and_then(|pair| pair.split_once('='))
+        .map(|(_, token)| token)
+        .ok_or_else(|| AppError::internal("invalid session cookie value"))?;
+    codoseo_store::auth::revoke_session(&state.pool, &hash(token)).await?;
+    Ok(())
+}
+
 /// Reads one cookie from the request.
 pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
