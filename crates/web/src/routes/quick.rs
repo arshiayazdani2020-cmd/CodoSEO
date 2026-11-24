@@ -514,6 +514,7 @@ async fn unlock(
                     crawl_id: audit.crawl.id,
                     domain: &audit.domain,
                 }),
+                None,
             )
             .await?;
             match outcome {
@@ -527,6 +528,10 @@ async fn unlock(
                     )
                     .await?;
                     card.sent = true;
+                }
+                LinkOutcome::LoginThrottled => {
+                    status = StatusCode::TOO_MANY_REQUESTS;
+                    card.error = Some("Please try again later.".to_owned());
                 }
                 LinkOutcome::Throttled(slot) => {
                     status = StatusCode::TOO_MANY_REQUESTS;
