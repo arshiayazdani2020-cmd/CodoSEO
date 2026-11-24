@@ -247,7 +247,13 @@ pub async fn consume(
 
     let payload = used.payload.unwrap_or_default();
     let result = complete_magic_sign_in(&state, payload, &headers).await;
-    if result.is_err() {
+    // Only transient/internal processing failures are retryable. Permanent policy or request
+    // errors (for example, signups being closed) must leave the token consumed.
+    let should_restore = matches!(
+        &result,
+        Err(AppError::Unavailable | AppError::Internal(_))
+    );
+    if should_restore {
         match codoseo_store::auth::unconsume_token(
             &state.pool,
             TokenPurpose::MagicLink,
