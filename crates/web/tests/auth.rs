@@ -113,7 +113,7 @@ async fn two_concurrent_posts_can_consume_a_magic_link_only_once() {
 async fn inject_write_failure(app: &TestApp, trigger_sql: &str) {
     sqlx::query(
         "CREATE FUNCTION codoseo_test_fail() RETURNS trigger \
-         LANGUAGE plpgsql AS $ BEGIN RAISE EXCEPTION 'injected database failure'; END $",
+         LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''injected database failure''; END'",
     )
     .execute(app.pool())
     .await
