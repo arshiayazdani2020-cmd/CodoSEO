@@ -1,7 +1,6 @@
-name: RAJ dependency candidate (read-only)
+name: RAJ committed remediation gate (read-only)
 
-# Temporary evaluation workflow: resolve a candidate lockfile and print its diff.
-# No Git push, package publishing, deployment or real service credentials.
+# Temporary, scoped final gate: validate the committed lockfile without resolving changes.
 on:
   pull_request:
     branches: [security/magic-link-recovery]
@@ -10,11 +9,13 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  candidate:
+  check:
     if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'security/ci-remediation'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:18
@@ -34,57 +35,61 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Install repository toolchain
+      - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install 1.99.0 --profile minimal -c rustfmt -c clippy
-      - name: Verify formatting
-        run: cargo fmt --all --check
-      - name: Resolve narrowly scoped security updates
-        run: |
-          python3 - <<'PY'
-          import subprocess
-          import tomllib
-
-          targets = [
-              ("rmcp", "3.9.0"),
-              ("lettre", "0.11.24"),
-              ("url", "2.5.9"),
-              ("tokio", "1.53.3"),
-              ("webpki-roots", "1.0.10"),
-              ("webpki-root-certs", "1.0.10"),
-              ("rustls-webpki", "0.103.16"),
-              ("ctutils", "0.4.4"),
-          ]
-          def version(v):
-              return tuple(map(int, v.split(".")))
-          for name, target in targets:
-              with open("Cargo.lock", "rb") as f:
-                  packages = tomllib.load(f)["package"]
-              minimum = version(target)
-              versions = [
-                  p["version"] for p in packages if p["name"] == name
-                  and "-" not in p["version"]
-                  and version(p["version"])[0] == minimum[0]
-                  and (minimum[0] != 0 or version(p["version"])[1] == minimum[1])
-              ]
-              if not versions:
-                  raise SystemExit(f"No matching dependency family for {name}")
-              for current in versions:
-                  if version(current) < minimum:
-                      subprocess.run(["cargo", "update", "-p", f"{name}@{current}", "--precise", target], check=True)
-          PY
-      - name: Emit candidate lockfile patch for independent review
-        if: always()
-        run: |
-          echo 'RAJ_LOCK_PATCH_BEGIN'
-          git --no-pager diff --no-ext-diff -- Cargo.lock
-          echo 'RAJ_LOCK_PATCH_END'
-      - name: Check candidate dependency policy
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-      - name: Clippy on candidate
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Test candidate workspace
-        run: cargo test --locked --workspace
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+  # Licenses, advisories, banned crates and sources, per deny.toml. Nightly runs it again.
+  deny:
+    if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'security/ci-remediation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
+
+  # Builds the image natively on each architecture (no QEMU), checks its size and runs the
+  # self-host compose file against it. Publishing the image is the release workflow's job.
+  docker:
+    if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'security/ci-remediation'
+    name: docker (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: codoseo:ci
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+      - name: Image is under 40 MB
+        run: |
+          size="$(docker image inspect -f '{{.Size}}' codoseo:ci)"
+          echo "image size: $size bytes"
+          test "$size" -lt 40000000
+      - name: Compose up, healthcheck and crawl a test site
+        run: IMAGE=codoseo:ci PROJECT=codoseo-ci PORT=18080 deploy/test-container.sh
