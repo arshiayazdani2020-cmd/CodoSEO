@@ -266,6 +266,30 @@ async fn tokens_are_stored_hashed() {
 }
 
 #[tokio::test]
+async fn repeated_login_requests_for_the_same_email_are_not_app_rate_limited() {
+    let app = TestApp::new().await;
+    let mut tokens = Vec::new();
+
+    // The ordinary /login flow is distinct from Quick Audit's per-recipient unlock caps.
+    for _ in 0..5 {
+        tokens.push(request_link(&app, "repeat@example.com", "/").await);
+    }
+
+    let unique: std::collections::HashSet<_> = tokens.iter().collect();
+    assert_eq!(unique.len(), 5, "each request created a distinct magic link");
+    assert_eq!(app.mail.lock().unwrap().len(), 5, "all five emails were handed to the mailer");
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM login_tokens WHERE purpose = 'magic_link' AND payload->>'email' = $1",
+    )
+    .bind("repeat@example.com")
+    .fetch_one(app.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored, 5, "all five magic-link tokens were stored");
+}
+
+#[tokio::test]
 async fn invalid_email_shows_an_inline_error() {
     let app = TestApp::new().await;
     let res = app.post_hx("/login", "email=not-an-email", None).await;
