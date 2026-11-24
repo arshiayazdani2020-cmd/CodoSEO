@@ -9,6 +9,13 @@ on:
       - "crates/web/tests/auth.rs"
       - "crates/store/src/auth.rs"
       - "crates/store/src/accounts.rs"
+  pull_request:
+    paths:
+      - ".github/workflows/auth-tests.yml"
+      - "crates/web/src/auth/**"
+      - "crates/web/tests/auth.rs"
+      - "crates/store/src/auth.rs"
+      - "crates/store/src/accounts.rs"
   workflow_dispatch:
 
 permissions:
