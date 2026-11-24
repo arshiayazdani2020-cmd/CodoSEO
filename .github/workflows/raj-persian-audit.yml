@@ -1,0 +1,30 @@
+name: RAJ Persian audit fixture (read-only)
+on:
+  pull_request:
+    branches: [security/ci-remediation]
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  fixture:
+    if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'experiments/persian-audit-fixture'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p codoseo
+      - name: Run isolated Persian fixture
+        run: python3 experiments/raj-persian-audit.py target/debug/codoseo /tmp/raj-persian-audit
+      - name: Preserve synthetic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raj-persian-audit
+          path: /tmp/raj-persian-audit/
+          retention-days: 7
+          if-no-files-found: warn
