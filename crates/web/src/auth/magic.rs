@@ -232,10 +232,11 @@ pub async fn consume(
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    let token_hash = session::hash(&token);
     let used = codoseo_store::auth::consume_token(
         &state.pool,
         TokenPurpose::MagicLink,
-        &session::hash(&token),
+        &token_hash,
     )
     .await?
     .ok_or_else(|| {
@@ -245,6 +246,30 @@ pub async fn consume(
     })?;
 
     let payload = used.payload.unwrap_or_default();
+    let result = complete_magic_sign_in(&state, payload, &headers).await;
+    if result.is_err() {
+        match codoseo_store::auth::unconsume_token(
+            &state.pool,
+            TokenPurpose::MagicLink,
+            &token_hash,
+        )
+        .await
+        {
+            Ok(true) => tracing::warn!("magic-link processing failed; the unexpired token was restored for retry"),
+            Ok(false) => tracing::error!("magic-link processing failed and its token could not be restored"),
+            Err(error) => tracing::error!(%error, "magic-link processing failed and token recovery also failed"),
+        }
+    }
+    result
+}
+
+/// Completes the side effects before creating the browser session. If any step fails, the
+/// caller restores the still-unexpired magic-link token so the visitor can retry.
+async fn complete_magic_sign_in(
+    state: &AppState,
+    payload: serde_json::Value,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
     let address = payload["email"]
         .as_str()
         .ok_or_else(|| AppError::internal("magic link without an email"))?;
@@ -257,31 +282,39 @@ pub async fn consume(
             canonical: &canonical,
             github_id: None,
         },
-        signup_policy(&state),
+        signup_policy(state),
     )
     .await?;
     let account = match outcome {
         SignInOutcome::Existing(a) | SignInOutcome::Created(a) => a,
         SignInOutcome::SignupsClosed => return Err(signups_closed()),
     };
-    let cookie = session::start(&state, account.id).await?;
-    // Opening a link from one of our emails counts as activity for the inactivity check.
+
+    // Complete database work before issuing a session cookie. A failure must not leave a
+    // session row that the browser never received.
     codoseo_store::accounts::record_email_click(&state.pool, account.id).await?;
 
     // A link from the no-signup audit also attaches the audited site to the account.
     let audit = payload["audit"]
         .as_str()
         .and_then(|a| Uuid::parse_str(a).ok());
-    let Some(audit) = audit else {
-        return Ok(([(header::SET_COOKIE, cookie)], Redirect::to(&next)).into_response());
+    let destination = if let Some(audit) = audit {
+        crate::routes::quick::attach_after_login(state, &account, audit, headers).await?
+    } else {
+        next
     };
-    let to = crate::routes::quick::attach_after_login(&state, &account, audit, &headers).await?;
-    let spent = crate::routes::quick::clear_claim_cookie(&state);
-    Ok((
-        AppendHeaders([(header::SET_COOKIE, cookie), (header::SET_COOKIE, spent)]),
-        Redirect::to(&to),
-    )
-        .into_response())
+
+    let cookie = session::start(state, account.id).await?;
+    if audit.is_some() {
+        let spent = crate::routes::quick::clear_claim_cookie(state);
+        Ok((
+            AppendHeaders([(header::SET_COOKIE, cookie), (header::SET_COOKIE, spent)]),
+            Redirect::to(&destination),
+        )
+            .into_response())
+    } else {
+        Ok(([(header::SET_COOKIE, cookie)], Redirect::to(&destination)).into_response())
+    }
 }
 
 pub fn signups_closed() -> AppError {
