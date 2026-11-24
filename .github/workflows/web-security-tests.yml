@@ -1,0 +1,49 @@
+name: web-security-tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/web-security-tests.yml"
+      - "crates/web/**"
+      - "crates/mcp/**"
+      - "crates/store/**"
+      - "crates/core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web-mcp-security:
+    name: REST API and MCP security integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Run REST API and MCP security integration tests
+        run: cargo test -p codoseo-web --test api --test mcp_anon --test mcp_keyed --locked
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
