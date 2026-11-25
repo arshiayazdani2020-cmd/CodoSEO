@@ -1,0 +1,55 @@
+name: RAJ Windows local evaluation build
+on:
+  pull_request:
+    branches: [security/ci-remediation]
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  windows:
+    if: github.repository == 'arshiayazdani2020-cmd/CodoSEO' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'experiments/windows-local-build'
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --target x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: raj-windows-x64
+      - name: Build reviewed source
+        run: cargo build --locked --profile dist -p codoseo --target x86_64-pc-windows-msvc
+      - name: Verify Windows executable
+        shell: pwsh
+        run: |
+          $exe = "target/x86_64-pc-windows-msvc/dist/codoseo.exe"
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Version check failed" }
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw "Help check failed" }
+      - name: Run Persian loopback smoke tests
+        run: python experiments/raj-persian-audit.py target/x86_64-pc-windows-msvc/dist/codoseo.exe "${{ runner.temp }}/raj-windows-fixture"
+      - name: Package executable and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package -Force | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/dist/codoseo.exe package/
+          Copy-Item LICENSE package/
+          $digest = (Get-FileHash package/codoseo.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  codoseo.exe" | Set-Content package/SHA256SUMS.txt -Encoding ascii
+          $commit = (git rev-parse HEAD).Trim()
+          "Experimental Windows x64 CLI build. Source: https://github.com/arshiayazdani2020-cmd/CodoSEO/tree/$commit" | Set-Content package/SOURCE.txt -Encoding utf8
+          Write-Host "RAJ_EXE_SHA256=$digest"
+          Write-Host "RAJ_SOURCE_COMMIT=$commit"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codoseo-raj-windows-x64
+          path: package/
+          retention-days: 14
+          if-no-files-found: error
